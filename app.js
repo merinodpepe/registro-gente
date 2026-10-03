@@ -73,7 +73,7 @@
   const hue = (s) => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
 
   /* ---------- autenticación (Google Identity Services) ---------- */
-  let tokenClient = null, pending = null;
+  let tokenClient = null, pending = null, inflight = null;
   window.__gsiReady = () => { initAuth(); };
 
   function initAuth() {
@@ -84,7 +84,7 @@
       callback: (r) => {
         if (r.error) return pending?.reject(new Error(r.error));
         state.token = r.access_token;
-        state.expires = Date.now() + (Number(r.expires_in) - 60) * 1000;
+        state.expires = Date.now() + ((Number(r.expires_in) || 3600) - 60) * 1000;
         LS.set(LS.signed, "1");
         pending?.resolve(state.token);
       },
@@ -93,11 +93,14 @@
     if (state.waitingInit) { state.waitingInit(); state.waitingInit = null; }
   }
 
+  // Una sola petición de token en vuelo: las llamadas simultáneas comparten la misma promesa
   function requestToken(prompt) {
-    return new Promise((resolve, reject) => {
+    if (inflight) return inflight;
+    inflight = new Promise((resolve, reject) => {
       const go = () => { pending = { resolve, reject }; tokenClient.requestAccessToken({ prompt }); };
       if (tokenClient) go(); else { state.waitingInit = go; initAuth(); }
-    });
+    }).finally(() => { inflight = null; });
+    return inflight;
   }
   async function ensureToken() {
     if (state.token && Date.now() < state.expires) return state.token;
@@ -106,10 +109,16 @@
 
   async function api(path, opts = {}, retry = true) {
     const token = await ensureToken();
-    const res = await fetch(API + path, {
-      ...opts,
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(opts.headers || {}) },
-    });
+    let res;
+    try {
+      res = await fetch(API + path, {
+        ...opts,
+        signal: AbortSignal.timeout(20000),
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(opts.headers || {}) },
+      });
+    } catch {
+      const err = new Error("Sin conexión con Google. Revisa tu internet e inténtalo de nuevo."); err.offline = true; throw err;
+    }
     if (res.status === 401 && retry) { state.token = null; return api(path, opts, false); }
     if (!res.ok) {
       let msg = res.statusText;
@@ -123,8 +132,10 @@
   async function loadSheetMeta() {
     const meta = await api(`/${state.sheetId}?fields=sheets.properties(sheetId,title)`);
     // Si la pestaña configurada no existe, usa la primera de la hoja
-    const sh = meta.sheets.find((s) => s.properties.title === state.tab) || meta.sheets[0];
+    const found = meta.sheets.find((s) => s.properties.title === state.tab);
+    const sh = found || meta.sheets[0];
     if (!sh) throw new Error("El Sheet no tiene pestañas.");
+    if (!found) toast(`No existe la pestaña "${state.tab}". Uso "${sh.properties.title}".`, true);
     state.tab = sh.properties.title;
     state.gid = sh.properties.sheetId;
   }
@@ -135,18 +146,18 @@
     const rows = data.values || [];
     const h = rows.findIndex((r) => norm(r[0]).trim() === "id");
     if (h === -1) throw new Error('No encuentro la fila de encabezados (la celda "ID" en la columna A).');
+    if (norm(rows[h][2]).trim() !== "nombre") throw new Error("Las columnas del Sheet no coinciden (ID, Fecha, Nombre…). No escribo nada para no estropearlo.");
     state.headerRow = h + 1;
     const people = [];
     rows.slice(h + 1).forEach((r, i) => {
       const o = {};
       COLS.forEach((c, k) => (o[c] = c === "fecha" ? toISODate(r[k]) : str(r[k])));
-      if (!o.nombre.trim() && !o.contexto.trim() && !o.lugar.trim() && !o.fisica.trim()) return;
+      if (COLS.slice(1).every((c) => !o[c].trim())) return;
       o.id = Number(r[0]) || 0;
       o.row = h + 2 + i; // fila real en la hoja (1-indexada)
       people.push(o);
     });
     state.people = people;
-    LS.set(LS.cache, JSON.stringify({ sheet: state.sheetId, people }));
   }
 
   async function refresh(silent = false) {
@@ -168,39 +179,44 @@
 
   function handleError(e) {
     console.error(e);
-    if (e.status === 403 || e.status === 404) toast("No tengo acceso a esa hoja. ¿Es la correcta y de tu cuenta?", true);
+    if (e.offline) toast(e.message, true);
+    else if (e.status === 403 || e.status === 404) toast("No tengo acceso a esa hoja. ¿Es la correcta y de tu cuenta?", true);
     else if (/popup|interaction|immediate|access_denied|auth/i.test(e.message)) { showView("login"); $("login-msg").textContent = "Tu sesión ha caducado. Vuelve a entrar."; }
     else toast(e.message || "Error", true);
   }
 
   const nextId = () => state.people.reduce((m, p) => Math.max(m, p.id), 0) + 1;
 
-  function formValues() {
+  function rawValues() {
     return [
       Number($("f-id").value), $("f-fecha").value, $("f-nombre").value.trim(), $("f-fisica").value.trim(), $("f-lugar").value.trim(),
       $("f-contexto").value.trim(), $("f-tag").value.trim(), $("f-contacto").value.trim(), $("f-notas").value.trim(),
     ];
   }
+  // Evita que el Sheet interprete texto como fórmula/fecha/número (=, +, -, @, ceros iniciales, 1/2…)
+  const safe = (s) => (/^[=+\-@\t\r]/.test(s) || /^0\d/.test(s) || /^\d+([/.-]\d+)+$/.test(s) ? "'" + s : s);
+  const formValues = () => rawValues().map((v, k) => (k >= 2 ? safe(v) : v));
 
   async function savePerson() {
     const row = Number($("f-row").value);
     const values = formValues();
     if (DEMO) {
-      const o = Object.fromEntries(COLS.map((c, k) => [c, c === "id" ? values[k] : String(values[k])]));
+      const raw = rawValues();
+      const o = Object.fromEntries(COLS.map((c, k) => [c, c === "id" ? raw[k] : String(raw[k])]));
       if (row) Object.assign(state.people.find((x) => x.row === row), o);
       else state.people.push({ ...o, id: nextId(), row: nextId() + 3 });
       return;
     }
     if (!row) {
-      // nueva persona: justo debajo de la última fila con datos
-      const last = Math.max(state.headerRow, ...state.people.map((p) => p.row));
-      const target = last + 1;
+      // nueva persona: añade al final sin pisar nada (ID calculado con datos recién leídos)
+      await loadPeople();
       values[0] = nextId();
-      await api(`/${state.sheetId}/values/${encodeURIComponent(`${quoteTab(state.tab)}!A${target}:${LAST_COL}${target}`)}?valueInputOption=USER_ENTERED`, {
-        method: "PUT", body: JSON.stringify({ values: [values] }),
+      await api(`/${state.sheetId}/values/${encodeURIComponent(`${quoteTab(state.tab)}!A:${LAST_COL}`)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
+        method: "POST", body: JSON.stringify({ values: [values] }),
       });
     } else {
-      await assertRow(row, values[0]);
+      const orig = state.people.find((x) => x.row === row);
+      await assertRow(orig);
       await api(`/${state.sheetId}/values/${encodeURIComponent(`${quoteTab(state.tab)}!A${row}:${LAST_COL}${row}`)}?valueInputOption=USER_ENTERED`, {
         method: "PUT", body: JSON.stringify({ values: [values] }),
       });
@@ -208,14 +224,15 @@
   }
 
   // Evita pisar otra fila si alguien movió filas en el Sheet mientras tanto
-  async function assertRow(row, id) {
-    const r = await api(`/${state.sheetId}/values/${encodeURIComponent(`${quoteTab(state.tab)}!A${row}`)}?valueRenderOption=UNFORMATTED_VALUE`);
-    if (Number(r.values?.[0]?.[0]) !== id) { await refresh(true); throw new Error("La hoja cambió. He recargado; vuelve a intentarlo."); }
+  async function assertRow(p) {
+    const r = await api(`/${state.sheetId}/values/${encodeURIComponent(`${quoteTab(state.tab)}!A${p.row}:C${p.row}`)}?valueRenderOption=UNFORMATTED_VALUE`);
+    const v = r.values?.[0] || [];
+    if (!p.id || Number(v[0]) !== p.id || str(v[2]) !== p.nombre) { await refresh(true); throw new Error("La hoja cambió. He recargado; vuelve a intentarlo."); }
   }
 
   async function deletePerson(p) {
     if (DEMO) { state.people = state.people.filter((x) => x !== p); return; }
-    await assertRow(p.row, p.id);
+    await assertRow(p);
     await api(`/${state.sheetId}:batchUpdate`, {
       method: "POST",
       body: JSON.stringify({ requests: [{ deleteDimension: { range: { sheetId: state.gid, dimension: "ROWS", startIndex: p.row - 1, endIndex: p.row } } }] }),
@@ -287,28 +304,44 @@
     return out;
   }
 
-  function chev() {
+  const openIds = new Set();
+  const svgIcon = (d, cls) => {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("class", "chev"); svg.setAttribute("aria-hidden", "true");
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path"); path.setAttribute("d", "m6 9 6 6 6-6");
+    svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("class", cls); svg.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path"); path.setAttribute("d", d);
     svg.append(path); return svg;
-  }
+  };
+  const chev = () => svgIcon("m6 9 6 6 6-6", "chev");
+  const phoneIcon = () => svgIcon("M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z", "contact-ico");
 
   function card(p, q, i = 0) {
     const f = (label, value) => (value.trim() ? el("div", { class: "field" }, el("dt", { text: label }), el("dd", {}, highlight(value, q))) : null);
-    const c = el("article", { class: "card", tabindex: "0", style: `--i:${Math.min(i, 10)}` },
-      el("div", { class: "card-head" },
-        el("div", { class: "avatar", style: `background:linear-gradient(135deg,hsl(${hue(p.nombre || "?")} 62% 58%),hsl(${(hue(p.nombre || "?") + 40) % 360} 60% 46%))`, "aria-hidden": "true", text: (p.nombre.trim()[0] || "?").toUpperCase() }),
-        el("div", { class: "card-title" }, el("h3", {}, highlight(p.nombre || "Sin nombre", q)), el("p", {}, highlight([p.lugar, p.fisica].filter(Boolean).join(" · ") || "—", q))),
-        el("div", { class: "card-meta" }, state.sort === "name" ? el("span", { text: dateLabel(p.fecha) }) : null, p.contacto.trim() ? el("span", { class: "has-contact", title: "Tiene contacto", "aria-label": "Tiene contacto", text: "📞" }) : null, chev())),
-      splitTags(p.tag).length ? el("div", { class: "tags" }, splitTags(p.tag).map((t) => el("span", { class: "tag", text: t }))) : null,
-      el("div", { class: "card-body" }, el("div", {}, el("div", { class: "card-inner" },
-        el("dl", { style: "margin:0" }, f("Descripción física", p.fisica), f("Lugar", p.lugar), f("Contexto / Conversación", p.contexto), f("Contacto", p.contacto), f("Notas extra", p.notas)),
-        el("div", { class: "card-actions" }, ...contactActions(p.contacto), el("button", { class: "btn primary", type: "button", onclick: (e) => { e.stopPropagation(); openForm(p); }, text: "Editar" }))))));
-    c.setAttribute("role", "button"); c.setAttribute("aria-expanded", "false");
-    const toggle = () => c.setAttribute("aria-expanded", String(c.classList.toggle("open")));
-    c.addEventListener("click", (e) => { if (!e.target.closest("a,button")) toggle(); });
-    c.addEventListener("keydown", (e) => { if (e.target === c && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggle(); } });
+    const isOpen = openIds.has(p.id);
+    const bodyId = `cb-${p.row}`;
+    const hv = hue(p.nombre || "?");
+    const tags = splitTags(p.tag);
+    const head = el("button", { class: "card-head", type: "button", "aria-expanded": String(isOpen), "aria-controls": bodyId },
+      el("span", { class: "avatar", style: `background:linear-gradient(135deg,hsl(${hv} 62% 58%),hsl(${(hv + 40) % 360} 60% 46%))`, "aria-hidden": "true", text: (p.nombre.trim()[0] || "?").toUpperCase() }),
+      el("span", { class: "card-title" }, el("span", { class: "card-name" }, highlight(p.nombre || "Sin nombre", q)), el("span", { class: "card-sub" }, highlight([p.lugar, p.fisica].filter(Boolean).join(" · ") || "—", q))),
+      el("span", { class: "card-meta" },
+        state.sort === "name" ? el("span", { text: dateLabel(p.fecha) }) : null,
+        p.contacto.trim() ? el("span", { class: "has-contact" }, phoneIcon(), el("span", { class: "sr-only", text: "Tiene contacto" })) : null,
+        chev()));
+    const body = el("div", { class: "card-body", id: bodyId }, el("div", {}, el("div", { class: "card-inner" },
+      el("dl", { style: "margin:0" }, f("Descripción física", p.fisica), f("Lugar", p.lugar), f("Contexto / Conversación", p.contexto), f("Contacto", p.contacto), f("Notas extra", p.notas), f("Fecha", p.fecha ? new Date(p.fecha + "T00:00:00").toLocaleDateString("es-ES", { day: "numeric", month: "long", year: "numeric" }) : "")),
+      el("div", { class: "card-actions" }, ...contactActions(p.contacto), el("button", { class: "btn primary", type: "button", onclick: (e) => { e.stopPropagation(); openForm(p); }, text: "Editar" })))));
+    body.inert = !isOpen;
+    const c = el("article", { class: "card" + (isOpen ? " open" : ""), style: `--i:${Math.min(i, 10)}` },
+      el("h3", { class: "card-h" }, head),
+      tags.length ? el("div", { class: "tags" }, tags.map((t) => el("span", { class: "tag", text: t }))) : null,
+      body);
+    const toggle = () => {
+      const o = c.classList.toggle("open");
+      head.setAttribute("aria-expanded", String(o)); body.inert = !o;
+      if (o) openIds.add(p.id); else openIds.delete(p.id);
+    };
+    head.addEventListener("click", toggle);
+    c.addEventListener("click", (e) => { if (!e.target.closest("a,button,.card-body")) toggle(); });
     return c;
   }
 
@@ -326,11 +359,16 @@
       }
       out.push(card(p, q, out.length));
     }
+    $("list").classList.toggle("no-anim", state.rendered);
+    state.rendered = true;
     $("list").replaceChildren(...out);
     $("empty").hidden = list.length > 0;
   }
 
   /* ---------- formulario ---------- */
+  let snap = "";
+  const dirty = () => JSON.stringify(rawValues()) !== snap;
+
   function openForm(p) {
     const edit = !!p;
     $("form-title").textContent = edit ? `Editar a ${p.nombre || "persona"}` : "Nueva persona";
@@ -346,13 +384,15 @@
     $("f-notas").value = edit ? p.notas : "";
     $("btn-delete").hidden = !edit;
     $("form-msg").textContent = "";
+    $("more").open = edit && !!(p.fisica || p.tag || p.notas);
+    snap = JSON.stringify(rawValues());
     $("dlg-form").showModal();
     if (!edit) $("f-nombre").focus();
   }
 
   function exportCSV() {
     const head = ["ID", "Fecha", "Nombre", "Descripción física", "Lugar", "Contexto / Conversación", "Vibes / Tag", "Contacto (IG / Telf)", "Notas extra"];
-    const esc = (v) => `"${str(v).replace(/"/g, '""')}"`;
+    const esc = (v) => { const t = str(v); return `"${(/^[=+\-@\t\r]/.test(t) ? "'" + t : t).replace(/"/g, '""')}"`; };
     const csv = [head, ...state.people.map((p) => COLS.map((c) => p[c]))].map((r) => r.map(esc).join(",")).join("\n");
     const a = el("a", { href: URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" })), download: `encuentros-${todayISO()}.csv` });
     a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
@@ -385,9 +425,8 @@
     state.sheetId = CFG.SHEET_ID || LS.get(LS.sheet) || "";
     state.tab = LS.get(LS.tab) || CFG.DEFAULT_TAB;
     if (!state.sheetId) { $("setup-tab").value = state.tab; showView("setup"); return; }
-    // pintar la caché mientras se autentica (si existe)
-    try { const c = JSON.parse(LS.get(LS.cache) || "null"); if (c?.sheet === state.sheetId) { state.people = c.people; showView("app"); render(); } } catch { /* sin caché */ }
-    if (LS.get(LS.signed) !== "1") { state.people = []; showView("login"); return; }
+    LS.del(LS.cache); // limpia cachés de versiones anteriores: no guardamos datos personales en el navegador
+    if (LS.get(LS.signed) !== "1") { showView("login"); return; }
     try {
       await requestToken("");
       showView("app");
@@ -419,11 +458,17 @@
 
   $("btn-refresh").addEventListener("click", () => refresh());
   $("fab").addEventListener("click", () => openForm(null));
-  $("q").addEventListener("input", (e) => { state.q = e.target.value; render(); });
+  let qTimer;
+  $("q").addEventListener("input", (e) => { clearTimeout(qTimer); qTimer = setTimeout(() => { state.q = e.target.value; render(); }, 120); });
   $("sort").addEventListener("change", (e) => { state.sort = e.target.value; render(); });
 
-  $("btn-menu").addEventListener("click", (e) => { e.stopPropagation(); $("menu").hidden = !$("menu").hidden; });
-  document.addEventListener("click", () => ($("menu").hidden = true));
+  function setMenu(open, focus = false) {
+    $("menu").hidden = !open; $("btn-menu").setAttribute("aria-expanded", String(open));
+    if (open) $("menu").querySelector("button").focus(); else if (focus) $("btn-menu").focus();
+  }
+  $("btn-menu").addEventListener("click", (e) => { e.stopPropagation(); setMenu($("menu").hidden); });
+  document.addEventListener("click", () => { if (!$("menu").hidden) setMenu(false); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("menu").hidden) setMenu(false, true); });
   $("menu-export").addEventListener("click", exportCSV);
   $("menu-settings").addEventListener("click", () => { $("setup-sheet").value = state.sheetId; $("setup-tab").value = state.tab; showView("setup"); });
   $("menu-logout").addEventListener("click", () => {
@@ -433,20 +478,38 @@
     $("list").replaceChildren(); showView("login");
   });
 
-  document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => b.closest("dialog").close()));
-  document.querySelectorAll("dialog").forEach((d) => d.addEventListener("click", (e) => { if (e.target === d) d.close(); }));
+  function closeDlg(d) {
+    if (!d.open || d.classList.contains("closing")) return;
+    d.classList.add("closing");
+    setTimeout(() => { d.classList.remove("closing"); d.close(); }, 200);
+  }
+  function requestClose(d) {
+    if (d.id === "dlg-form" && dirty() && !confirm("¿Descartar lo que has escrito?")) return;
+    closeDlg(d);
+  }
+  document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => requestClose(b.closest("dialog"))));
+  document.querySelectorAll("dialog").forEach((d) => {
+    d.addEventListener("click", (e) => { if (e.target === d) requestClose(d); });
+    d.addEventListener("cancel", (e) => { e.preventDefault(); requestClose(d); });
+  });
 
   $("form").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const btn = $("btn-save"); btn.disabled = true; btn.textContent = "Guardando…"; $("form-msg").textContent = "";
+    const btn = $("btn-save");
+    if (!$("f-nombre").value.trim() && !$("f-fisica").value.trim()) {
+      $("form-msg").textContent = "Pon un nombre o, al menos, una descripción física.";
+      $("more").open = true; $("f-nombre").focus(); return;
+    }
+    btn.disabled = true; btn.setAttribute("aria-busy", "true"); btn.textContent = "Guardando…"; $("form-msg").textContent = "";
     try {
       const isNew = !$("f-row").value;
       await savePerson();
-      $("dlg-form").close();
+      snap = JSON.stringify(rawValues());
+      closeDlg($("dlg-form"));
       toast(isNew ? "Añadido ✓" : "Guardado ✓"); navigator.vibrate?.(15);
       await refresh(true);
     } catch (err) { $("form-msg").textContent = err.message; }
-    finally { btn.disabled = false; btn.textContent = "Guardar"; }
+    finally { btn.disabled = false; btn.removeAttribute("aria-busy"); btn.textContent = "Guardar"; }
   });
 
   let toDelete = null;
@@ -456,11 +519,12 @@
     $("confirm-name").textContent = toDelete.nombre || "esta persona";
     $("dlg-confirm").showModal();
   });
-  $("confirm-no").addEventListener("click", () => $("dlg-confirm").close());
+  $("confirm-no").addEventListener("click", () => closeDlg($("dlg-confirm")));
   $("confirm-yes").addEventListener("click", async () => {
-    $("dlg-confirm").close();
-    try { await deletePerson(toDelete); $("dlg-form").close(); toast("Borrado"); await refresh(true); }
-    catch (err) { toast(err.message, true); }
+    const btn = $("confirm-yes"); btn.disabled = true;
+    try { await deletePerson(toDelete); closeDlg($("dlg-confirm")); snap = JSON.stringify(rawValues()); closeDlg($("dlg-form")); toast("Borrado"); await refresh(true); }
+    catch (err) { closeDlg($("dlg-confirm")); toast(err.message, true); }
+    finally { btn.disabled = false; }
   });
 
   let lastY = 0;
