@@ -1,0 +1,8 @@
+# Credenciales y datos reales: nunca al repo
+client_secret*.json
+Token*.txt
+Tokens*.txt
+*.xlsx
+*.csv
+.env
+.claude/

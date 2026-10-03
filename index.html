@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#7c3aed">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Registro de Encuentros</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='24' fill='%237c3aed'/%3E%3Ccircle cx='50' cy='38' r='16' fill='white'/%3E%3Cpath d='M22 82c4-18 17-26 28-26s24 8 28 26z' fill='white'/%3E%3C/svg%3E">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar" id="topbar" hidden>
+    <div class="brand"><span class="logo" aria-hidden="true">👋</span><h1>Encuentros</h1></div>
+    <div class="top-actions">
+      <button class="icon-btn" id="btn-refresh" title="Actualizar" aria-label="Actualizar">⟳</button>
+      <button class="icon-btn" id="btn-menu" title="Menú" aria-label="Menú">⋯</button>
+      <div class="menu" id="menu" hidden>
+        <button id="menu-export">Exportar CSV</button>
+        <button id="menu-settings">Cambiar hoja</button>
+        <button id="menu-logout">Cerrar sesión</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Login -->
+    <section class="center-card" id="view-login" hidden>
+      <div class="hero">👋</div>
+      <h2>Registro de Encuentros</h2>
+      <p>Tu libreta privada de gente que conoces. Los datos viven en tu Google Sheet y solo tú puedes verlos.</p>
+      <button class="btn primary big" id="btn-login">Entrar con Google</button>
+      <p class="muted small" id="login-msg"></p>
+    </section>
+
+    <!-- Configuración de la hoja -->
+    <section class="center-card" id="view-setup" hidden>
+      <h2>Conecta tu hoja</h2>
+      <p>Pega la URL de tu Google Sheet (o solo su ID).</p>
+      <form id="setup-form" class="stack">
+        <label>URL o ID del Sheet
+          <input id="setup-sheet" required placeholder="https://docs.google.com/spreadsheets/d/…" autocomplete="off">
+        </label>
+        <label>Nombre de la pestaña
+          <input id="setup-tab" required value="Hoja 1" autocomplete="off">
+        </label>
+        <button class="btn primary" type="submit">Conectar</button>
+        <p class="error small" id="setup-msg"></p>
+      </form>
+    </section>
+
+    <!-- App -->
+    <section id="view-app" hidden>
+      <div class="stats" id="stats"></div>
+
+      <div class="toolbar">
+        <div class="search">
+          <input id="q" type="search" placeholder="Buscar nombre, lugar, conversación…" autocomplete="off">
+        </div>
+        <select id="sort" aria-label="Ordenar">
+          <option value="date-desc">Más recientes</option>
+          <option value="date-asc">Más antiguos</option>
+          <option value="name">Nombre A–Z</option>
+        </select>
+      </div>
+      <div class="chips" id="chips"></div>
+
+      <div id="list" class="list"></div>
+      <div class="empty" id="empty" hidden>
+        <div class="hero">🔎</div>
+        <p>No hay resultados.</p>
+      </div>
+      <div class="skeletons" id="loading" hidden>
+        <div class="sk"></div><div class="sk"></div><div class="sk"></div>
+      </div>
+    </section>
+  </main>
+
+  <button class="fab" id="fab" aria-label="Añadir persona" hidden>＋</button>
+
+  <!-- Formulario -->
+  <dialog id="dlg-form">
+    <form id="form" method="dialog" class="stack">
+      <div class="dlg-head">
+        <h3 id="form-title">Nueva persona</h3>
+        <button type="button" class="icon-btn" data-close aria-label="Cerrar">✕</button>
+      </div>
+      <input type="hidden" id="f-row">
+      <input type="hidden" id="f-id">
+      <div class="grid2">
+        <label>Nombre <input id="f-nombre" required autocomplete="off" placeholder="¿Cómo se llama?"></label>
+        <label>Fecha <input id="f-fecha" type="date" required></label>
+      </div>
+      <label>Descripción física <input id="f-fisica" autocomplete="off" placeholder="Para acordarte de quién es"></label>
+      <label>Lugar <input id="f-lugar" list="dl-lugares" autocomplete="off" placeholder="¿Dónde fue?"></label>
+      <label>Contexto / Conversación <textarea id="f-contexto" rows="3" placeholder="¿Qué le dijiste? ¿De qué hablasteis?"></textarea></label>
+      <label>Vibes / Tag <input id="f-tag" list="dl-tags" autocomplete="off" placeholder="molt top, simpática… (separa con comas)"></label>
+      <label>Contacto (IG / Telf) <input id="f-contacto" autocomplete="off" placeholder="@usuario o +34 600 000 000"></label>
+      <label>Notas extra <textarea id="f-notas" rows="2" placeholder="Cualquier otra cosa"></textarea></label>
+      <datalist id="dl-lugares"></datalist>
+      <datalist id="dl-tags"></datalist>
+      <p class="error small" id="form-msg"></p>
+      <div class="dlg-actions">
+        <button type="button" class="btn danger" id="btn-delete" hidden>Borrar</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn" data-close>Cancelar</button>
+        <button type="submit" class="btn primary" id="btn-save">Guardar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Confirmar borrado -->
+  <dialog id="dlg-confirm">
+    <div class="stack">
+      <h3>¿Borrar a <span id="confirm-name"></span>?</h3>
+      <p class="muted">Se eliminará la fila del Google Sheet. No se puede deshacer desde aquí.</p>
+      <div class="dlg-actions">
+        <span class="spacer"></span>
+        <button class="btn" id="confirm-no">Cancelar</button>
+        <button class="btn danger solid" id="confirm-yes">Borrar</button>
+      </div>
+    </div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer onload="window.__gsiReady && window.__gsiReady()"></script>
+</body>
+</html>
