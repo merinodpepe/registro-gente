@@ -6,3 +6,8 @@ Tokens*.txt
 *.csv
 .env
 .claude/
+
+# Plantillas de referencia (no subir)
+Website-Templates-master/
+Website-Templates-master.zip
+*.zip

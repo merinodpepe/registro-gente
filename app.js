@@ -321,7 +321,7 @@
     const hv = hue(p.nombre || "?");
     const tags = splitTags(p.tag);
     const head = el("button", { class: "card-head", type: "button", "aria-expanded": String(isOpen), "aria-controls": bodyId },
-      el("span", { class: "avatar", style: `background:linear-gradient(135deg,hsl(${hv} 62% 58%),hsl(${(hv + 40) % 360} 60% 46%))`, "aria-hidden": "true", text: (p.nombre.trim()[0] || "?").toUpperCase() }),
+      el("span", { class: "avatar", style: `--h:${hv}`, "aria-hidden": "true", text: (p.nombre.trim()[0] || "?").toUpperCase() }),
       el("span", { class: "card-title" }, el("span", { class: "card-name" }, highlight(p.nombre || "Sin nombre", q)), el("span", { class: "card-sub" }, highlight([p.lugar, p.fisica].filter(Boolean).join(" · ") || "—", q))),
       el("span", { class: "card-meta" },
         state.sort === "name" ? el("span", { text: dateLabel(p.fecha) }) : null,

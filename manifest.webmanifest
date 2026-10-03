@@ -3,11 +3,11 @@
   "short_name": "Encuentros",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#f6f4fb",
-  "theme_color": "#7c3aed",
+  "background_color": "#2d2d2d",
+  "theme_color": "#2d2d2d",
   "icons": [
     {
-      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='24' fill='%237c3aed'/%3E%3Ccircle cx='50' cy='38' r='16' fill='white'/%3E%3Cpath d='M22 82c4-18 17-26 28-26s24 8 28 26z' fill='white'/%3E%3C/svg%3E",
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='24' fill='%23FFEA00'/%3E%3Ccircle cx='50' cy='38' r='16' fill='white'/%3E%3Cpath d='M22 82c4-18 17-26 28-26s24 8 28 26z' fill='white'/%3E%3C/svg%3E",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any"
