@@ -150,6 +150,7 @@
   }
 
   async function refresh(silent = false) {
+    if (DEMO) { render(); return; }
     if (state.busy) return;
     state.busy = true;
     $("btn-refresh").classList.add("spin");
@@ -184,6 +185,12 @@
   async function savePerson() {
     const row = Number($("f-row").value);
     const values = formValues();
+    if (DEMO) {
+      const o = Object.fromEntries(COLS.map((c, k) => [c, c === "id" ? values[k] : String(values[k])]));
+      if (row) Object.assign(state.people.find((x) => x.row === row), o);
+      else state.people.push({ ...o, id: nextId(), row: nextId() + 3 });
+      return;
+    }
     if (!row) {
       // nueva persona: justo debajo de la última fila con datos
       const last = Math.max(state.headerRow, ...state.people.map((p) => p.row));
@@ -207,6 +214,7 @@
   }
 
   async function deletePerson(p) {
+    if (DEMO) { state.people = state.people.filter((x) => x !== p); return; }
     await assertRow(p.row, p.id);
     await api(`/${state.sheetId}:batchUpdate`, {
       method: "POST",
@@ -246,7 +254,7 @@
     const week = state.people.filter((p) => p.fecha >= wk).length;
     const withC = state.people.filter((p) => p.contacto.trim()).length;
     $("stats").replaceChildren(
-      ...[[state.people.length, "personas"], [week, "últimos 7 días"], [withC, "con contacto"]].map(([n, l]) => el("div", { class: "stat" }, el("b", { text: n }), el("span", { text: l }))),
+      ...[[state.people.length, "total"], [week, "esta semana"], [withC, "con contacto"]].map(([n, l]) => el("div", { class: "stat" }, el("b", { text: n }), el("span", { text: l }))),
     );
   }
 
@@ -279,18 +287,26 @@
     return out;
   }
 
-  function card(p, q) {
+  function chev() {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("class", "chev"); svg.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path"); path.setAttribute("d", "m6 9 6 6 6-6");
+    svg.append(path); return svg;
+  }
+
+  function card(p, q, i = 0) {
     const f = (label, value) => (value.trim() ? el("div", { class: "field" }, el("dt", { text: label }), el("dd", {}, highlight(value, q))) : null);
-    const c = el("article", { class: "card", tabindex: "0" },
+    const c = el("article", { class: "card", tabindex: "0", style: `--i:${Math.min(i, 10)}` },
       el("div", { class: "card-head" },
-        el("div", { class: "avatar", style: `background:hsl(${hue(p.nombre || "?")} 60% 50%)`, "aria-hidden": "true", text: (p.nombre.trim()[0] || "?").toUpperCase() }),
+        el("div", { class: "avatar", style: `background:linear-gradient(135deg,hsl(${hue(p.nombre || "?")} 62% 58%),hsl(${(hue(p.nombre || "?") + 40) % 360} 60% 46%))`, "aria-hidden": "true", text: (p.nombre.trim()[0] || "?").toUpperCase() }),
         el("div", { class: "card-title" }, el("h3", {}, highlight(p.nombre || "Sin nombre", q)), el("p", {}, highlight([p.lugar, p.fisica].filter(Boolean).join(" · ") || "—", q))),
-        el("span", { class: "card-date", text: dateLabel(p.fecha) })),
+        el("div", { class: "card-meta" }, state.sort === "name" ? el("span", { text: dateLabel(p.fecha) }) : null, p.contacto.trim() ? el("span", { class: "has-contact", title: "Tiene contacto", "aria-label": "Tiene contacto", text: "📞" }) : null, chev())),
       splitTags(p.tag).length ? el("div", { class: "tags" }, splitTags(p.tag).map((t) => el("span", { class: "tag", text: t }))) : null,
-      el("div", { class: "card-body" },
+      el("div", { class: "card-body" }, el("div", {}, el("div", { class: "card-inner" },
         el("dl", { style: "margin:0" }, f("Descripción física", p.fisica), f("Lugar", p.lugar), f("Contexto / Conversación", p.contexto), f("Contacto", p.contacto), f("Notas extra", p.notas)),
-        el("div", { class: "card-actions" }, ...contactActions(p.contacto), el("button", { class: "btn primary", type: "button", onclick: (e) => { e.stopPropagation(); openForm(p); }, text: "Editar" }))));
-    const toggle = () => c.classList.toggle("open");
+        el("div", { class: "card-actions" }, ...contactActions(p.contacto), el("button", { class: "btn primary", type: "button", onclick: (e) => { e.stopPropagation(); openForm(p); }, text: "Editar" }))))));
+    c.setAttribute("role", "button"); c.setAttribute("aria-expanded", "false");
+    const toggle = () => c.setAttribute("aria-expanded", String(c.classList.toggle("open")));
     c.addEventListener("click", (e) => { if (!e.target.closest("a,button")) toggle(); });
     c.addEventListener("keydown", (e) => { if (e.target === c && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggle(); } });
     return c;
@@ -298,6 +314,7 @@
 
   function render() {
     renderStats(); renderChips();
+    $("subtitle").textContent = state.people.length ? `${state.people.length} ${state.people.length === 1 ? "persona" : "personas"} registradas` : "Tu libreta privada";
     const q = state.q.trim();
     const list = filtered();
     const out = [];
@@ -307,7 +324,7 @@
         const label = dateLabel(p.fecha);
         if (label !== last) { out.push(el("h2", { class: "group-title", text: label })); last = label; }
       }
-      out.push(card(p, q));
+      out.push(card(p, q, out.length));
     }
     $("list").replaceChildren(...out);
     $("empty").hidden = list.length > 0;
@@ -348,7 +365,23 @@
     return /^[a-zA-Z0-9_-]{20,}$/.test(input.trim()) ? input.trim() : "";
   }
 
+  // Modo demo solo en localhost: datos inventados en memoria, sin tocar el Sheet (para probar la UI)
+  const DEMO = /^(localhost|127\.0\.0\.1)$/.test(location.hostname) && new URLSearchParams(location.search).has("demo");
+  function startDemo() {
+    const d = (n) => { const x = new Date(); x.setDate(x.getDate() - n); return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`; };
+    const mk = (id, n, nombre, fisica, lugar, contexto, tag, contacto, notas) => ({ id, row: id + 3, fecha: d(n), nombre, fisica, lugar, contexto, tag, contacto, notas });
+    state.people = [
+      mk(1, 0, "Lucía Ferrer", "Pelo rizado, chaqueta vaquera", "Café del Born", "Le pregunté por el libro que leía y acabamos hablando de Cortázar.", "simpática, curiosa", "@lucia.ferrer", "Quedamos en repetir el café"),
+      mk(2, 1, "Marc", "Alto, gorra roja", "Parada del bus 24", "Me dio conversación sobre el retraso del bus.", "molt top", "+34 600 123 456", ""),
+      mk(3, 1, "Aisha", "Pañuelo verde", "Biblioteca Jaume Fuster", "Me recomendó un sitio para estudiar.", "amable", "", "Estudia arquitectura"),
+      mk(4, 5, "Carlota Menéndez", "Morena bajita, mona", "Caminando bajo la lluvia", "Le dije 'oye, está lloviendo' y estuvimos hablando un buen rato.", "molt top, simpática", "", "Amiga de la familia de Joan"),
+      mk(5, 12, "Josep", "Bajito, fuertote", "Plaza Sants", "Esperábamos que parara de llover.", "", "", ""),
+    ];
+    showView("app"); render();
+  }
+
   async function start() {
+    if (DEMO) return startDemo();
     state.sheetId = CFG.SHEET_ID || LS.get(LS.sheet) || "";
     state.tab = LS.get(LS.tab) || CFG.DEFAULT_TAB;
     if (!state.sheetId) { $("setup-tab").value = state.tab; showView("setup"); return; }
@@ -410,7 +443,7 @@
       const isNew = !$("f-row").value;
       await savePerson();
       $("dlg-form").close();
-      toast(isNew ? "Añadido ✓" : "Guardado ✓");
+      toast(isNew ? "Añadido ✓" : "Guardado ✓"); navigator.vibrate?.(15);
       await refresh(true);
     } catch (err) { $("form-msg").textContent = err.message; }
     finally { btn.disabled = false; btn.textContent = "Guardar"; }
@@ -429,6 +462,15 @@
     try { await deletePerson(toDelete); $("dlg-form").close(); toast("Borrado"); await refresh(true); }
     catch (err) { toast(err.message, true); }
   });
+
+  let lastY = 0;
+  addEventListener("scroll", () => {
+    const y = scrollY;
+    $("topbar").classList.toggle("scrolled", y > 8);
+    $("fab").classList.toggle("compact", y > 60 && y > lastY);
+    if (y < lastY) $("fab").classList.remove("compact");
+    lastY = y;
+  }, { passive: true });
 
   start();
 })();
