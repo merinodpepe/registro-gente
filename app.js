@@ -122,8 +122,10 @@
   /* ---------- datos ---------- */
   async function loadSheetMeta() {
     const meta = await api(`/${state.sheetId}?fields=sheets.properties(sheetId,title)`);
-    const sh = meta.sheets.find((s) => s.properties.title === state.tab);
-    if (!sh) throw new Error(`No existe la pestaña "${state.tab}". Pestañas: ${meta.sheets.map((s) => s.properties.title).join(", ")}`);
+    // Si la pestaña configurada no existe, usa la primera de la hoja
+    const sh = meta.sheets.find((s) => s.properties.title === state.tab) || meta.sheets[0];
+    if (!sh) throw new Error("El Sheet no tiene pestañas.");
+    state.tab = sh.properties.title;
     state.gid = sh.properties.sheetId;
   }
 
